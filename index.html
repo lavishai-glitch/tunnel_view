@@ -37,7 +37,10 @@
 
   <div class="card">
     <div class="row"><label for="pid">מזהה נבדק</label><input id="pid" type="text" placeholder="P01"><span></span></div>
-    <div class="row"><label for="camSel">מצלמה</label><select id="camSel"><option value="">(ברירת מחדל)</option></select><span></span></div>
+    <div class="row"><label for="stereo">סטריאו</label><label><input id="stereo" type="checkbox"> מצלמה נפרדת לכל עין (שתי המצלמות)</label><span></span></div>
+    <div class="row"><label for="camSel">מצלמה לעין שמאל</label><select id="camSel"><option value="">(אוטומטי)</option></select><span></span></div>
+    <div class="row" id="rowR"><label for="camSelR">מצלמה לעין ימין</label><select id="camSelR"><option value="">(אוטומטי)</option></select><button id="btnSwap" type="button" style="padding:6px;margin:0">החלף</button></div>
+    <p class="mut" style="font-size:.85rem;margin:0 0 6px">ל-Quest 3 יש שתי מצלמות צבע קדמיות, אחת מול כל עין, והן מופיעות כאן בשמות טכניים. בלי סטריאו: מצלמה אחת לשתי העיניים, וברירת המחדל מספיקה. עם סטריאו: כל עין מקבלת את המצלמה שלה. אם העומק נראה הפוך או שקשה למזג את התמונות, לוחצים "החלף".</p>
     <div>
       <button id="btnCam" class="primary">1. הפעל מצלמה</button>
       <button id="btnXR" disabled>2. כניסה למשקפיים</button>
@@ -62,6 +65,13 @@
       <button data-mode="pass">passthrough מלא</button>
       <button id="btnFrame">מסגרת: פועלת</button>
     </div>
+    <div style="margin-top:10px">
+      <b>מה רואים מסביב לחלון:</b>
+      <button data-sur="black">החשכה מלאה</button>
+      <button data-sur="blur">טשטוש</button>
+    </div>
+    <div class="row"><label for="sBlur">עוצמת טשטוש</label><input id="sBlur" type="range" min="2" max="9" step="0.5"><output id="oBlur"></output></div>
+    <div class="row"><label for="sDim">בהירות הרקע המטושטש</label><input id="sDim" type="range" min="0.05" max="1" step="0.05"><output id="oDim"></output></div>
   </div>
 
   <div class="card">
@@ -81,6 +91,7 @@
       <tr><td>Y</td><td>איפוס לברירת מחדל</td></tr>
       <tr><td>הדק ימני</td><td>סימון "המסגרת נעלמה" (נרשם בלוג)</td></tr>
       <tr><td>הדק שמאלי</td><td>סימון "המסגרת חזרה" (נרשם בלוג)</td></tr>
+      <tr><td>לחיצה על הסטיק הימני</td><td>מעבר בין החשכה מלאה לטשטוש מסביב לחלון</td></tr>
       <tr><td>Grip (לחיצה ארוכה) + סטיק</td><td>צעדים עדינים (0.1°)</td></tr>
     </table>
   </div>
@@ -92,12 +103,13 @@
 </main>
 
 <video id="vid" playsinline muted style="display:none"></video>
+<video id="vidR" playsinline muted style="display:none"></video>
 
 <script type="module">
 import * as THREE from 'three';
 
 // ---------- state ----------
-const DEFAULTS = { W: 20, S: 80, Smax: 80, yaw: 0, pitch: 0, frameDeg: 0.8, frameOn: true, mode: 'compress', hud: false };
+const DEFAULTS = { W: 20, S: 80, Smax: 80, yaw: 0, pitch: 0, frameDeg: 0.8, frameOn: true, mode: 'compress', hud: false, surround: 'black', blur: 6, dim: 0.5 };
 let st = { ...DEFAULTS };
 try { Object.assign(st, JSON.parse(localStorage.getItem('fovState') || '{}')); } catch (e) {}
 st.hud = false;
@@ -133,7 +145,7 @@ function snapshot(event) {
     mode: st.mode, window_h_deg: +st.W.toFixed(2), window_v_deg: +vAngle(st.W).toFixed(2),
     source_h_deg: +st.S.toFixed(2), ratio: +(st.S / st.W).toFixed(3),
     yaw_deg: +st.yaw.toFixed(2), pitch_deg: +st.pitch.toFixed(2),
-    frame: st.frameOn ? 1 : 0, in_xr: renderer.xr.isPresenting ? 1 : 0
+    frame: st.frameOn ? 1 : 0, stereo: stereoActive ? 1 : 0, surround: st.surround, blur: st.blur, dim: st.dim, in_xr: renderer.xr.isPresenting ? 1 : 0
   };
 }
 function push(row) {
@@ -173,20 +185,67 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(90, 4 / 3, 0.05, 100);
 scene.add(camera);
 
-const video = $('vid');
-const tex = new THREE.VideoTexture(video);
-tex.colorSpace = THREE.SRGBColorSpace;
-tex.minFilter = THREE.LinearMipmapLinearFilter; // the image is minified several times: mipmaps prevent shimmering
-tex.generateMipmaps = true;
+const video = $('vid'), videoR = $('vidR');
+function makeTex(v) {
+  const t = new THREE.VideoTexture(v);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.minFilter = THREE.LinearMipmapLinearFilter; // the image is minified several times: mipmaps prevent shimmering
+  t.generateMipmaps = true;
+  return t;
+}
+const tex = makeTex(video), texR = makeTex(videoR);
+let stereoActive = false;
+// Layers: three.js renders layer 1 only to the left eye and layer 2 only to the right eye.
+camera.layers.enable(1); // 2D preview shows the left-eye image
 
 const rig = new THREE.Group();        // head-locked: child of the camera
 camera.add(rig);
 const win = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
 win.position.z = -DIST;
 rig.add(win);
+win.layers.set(1);
+const winR = new THREE.Mesh(win.geometry, new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+winR.position.z = -DIST;
+winR.layers.set(2);
+rig.add(winR);
 
 const frameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false });
 const bars = [0, 1, 2, 3].map(() => { const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), frameMat); m.position.z = -DIST; rig.add(m); return m; });
+
+// Opaque black shell around the head: guarantees nothing of the real world is seen
+// outside the window, whatever the browser does with passthrough.
+const shell = new THREE.Mesh(new THREE.SphereGeometry(20, 32, 16),
+  new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide, depthWrite: false }));
+shell.renderOrder = -2;
+camera.add(shell);
+
+// Blurred surround: the camera image at true size, sampled from a low mipmap level.
+const BG_DIST = 10;
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { map: { value: tex }, bias: { value: 6 }, dim: { value: 0.5 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D map; uniform float bias; uniform float dim; varying vec2 vUv;
+    void main(){
+      float o = exp2(bias) / 1280.0;
+      vec4 c = texture2D(map, vUv, bias)
+         + texture2D(map, vUv + vec2(o,0.0), bias) + texture2D(map, vUv - vec2(o,0.0), bias)
+         + texture2D(map, vUv + vec2(0.0,o), bias) + texture2D(map, vUv - vec2(0.0,o), bias);
+      gl_FragColor = vec4(c.rgb / 5.0 * dim, 1.0);
+      #include <colorspace_fragment>
+    }`,
+  depthWrite: false
+});
+const bg = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), bgMat);
+bg.renderOrder = -1;
+bg.position.z = -BG_DIST;
+bg.layers.set(1);
+camera.add(bg);
+const bgMatR = bgMat.clone();
+const bgR = new THREE.Mesh(bg.geometry, bgMatR);
+bgR.renderOrder = -1;
+bgR.position.z = -BG_DIST;
+bgR.layers.set(2);
+camera.add(bgR);
 
 // HUD (shown inside the window on demand so the participant/experimenter can read values)
 const hudCanvas = document.createElement('canvas'); hudCanvas.width = 512; hudCanvas.height = 128;
@@ -211,12 +270,15 @@ function layout() {
   const w = 2 * DIST * Math.tan(deg(st.W) / 2);
   const h = w / camAspect;
   win.scale.set(w, h, 1);
+  winR.scale.set(w, h, 1);
+  const rTex = stereoActive ? texR : tex;
+  winR.material.map = rTex;
+  bgMatR.uniforms.map.value = rTex;
   rig.rotation.set(deg(st.pitch), -deg(st.yaw), 0, 'YXZ');
 
   // centred crop of the rectilinear camera image: fraction of the image that spans S degrees
   const f = Math.min(1, Math.tan(deg(st.S) / 2) / Math.tan(deg(st.Smax) / 2));
-  tex.repeat.set(f, f);
-  tex.offset.set((1 - f) / 2, (1 - f) / 2);
+  for (const t of [tex, texR]) { t.repeat.set(f, f); t.offset.set((1 - f) / 2, (1 - f) / 2); }
 
   const t = DIST * Math.tan(deg(st.frameDeg));
   const [top, bot, left, right] = bars;
@@ -226,7 +288,13 @@ function layout() {
   right.scale.set(t, h, 1); right.position.set(w / 2 + t / 2, 0, -DIST);
 
   const pass = st.mode === 'pass';
-  win.visible = !pass;
+  const bw = 2 * BG_DIST * Math.tan(deg(st.Smax) / 2);
+  bg.scale.set(bw, bw / camAspect, 1);
+  bgR.scale.copy(bg.scale);
+  for (const m of [bgMat, bgMatR]) { m.uniforms.bias.value = st.blur; m.uniforms.dim.value = st.dim; }
+  bg.visible = bgR.visible = !pass && st.surround === 'blur';
+  shell.visible = !pass;
+  win.visible = winR.visible = !pass;
   bars.forEach(b => b.visible = st.frameOn && !pass);
   hud.visible = st.hud;
   hud.scale.set(w * 0.9, w * 0.9, 1);
@@ -240,7 +308,7 @@ function layout() {
 }
 
 // ---------- 2D UI ----------
-const sliders = { sW: 'W', sS: 'S', sMax: 'Smax', sYaw: 'yaw', sPitch: 'pitch', sFr: 'frameDeg' };
+const sliders = { sW: 'W', sS: 'S', sMax: 'Smax', sYaw: 'yaw', sPitch: 'pitch', sFr: 'frameDeg', sBlur: 'blur', sDim: 'dim' };
 function syncUi() {
   for (const [id, k] of Object.entries(sliders)) $(id).value = st[k];
   $('oW').textContent = st.W.toFixed(1) + '°';
@@ -252,6 +320,9 @@ function syncUi() {
   $('oFr').textContent = st.frameDeg.toFixed(1) + '°';
   $('oRatio').textContent = '×' + (st.S / st.W).toFixed(2);
   $('btnFrame').textContent = 'מסגרת: ' + (st.frameOn ? 'פועלת' : 'כבויה');
+  $('oBlur').textContent = st.blur.toFixed(1);
+  $('oDim').textContent = Math.round(st.dim * 100) + '%';
+  document.querySelectorAll('[data-sur]').forEach(b => b.classList.toggle('primary', b.dataset.sur === st.surround));
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('primary', b.dataset.mode === st.mode));
 }
 for (const [id, k] of Object.entries(sliders)) {
@@ -262,6 +333,7 @@ for (const [id, k] of Object.entries(sliders)) {
   });
 }
 document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => { st.mode = b.dataset.mode; layout(); log('mode', true); }));
+document.querySelectorAll('[data-sur]').forEach(b => b.addEventListener('click', () => { st.surround = b.dataset.sur; layout(); log('surround', true); }));
 $('btnFrame').onclick = () => { st.frameOn = !st.frameOn; layout(); log('frame_toggle', true); };
 $('btnCsv').onclick = () => { flush(); downloadCsv(); };
 $('btnClear').onclick = () => { if (confirmClear()) { LOG = []; try { localStorage.setItem('fovLog', '[]'); } catch (e) {} renderLog(); } };
@@ -273,35 +345,73 @@ function confirmClear() { // two clicks within 3 s instead of a blocking dialog
 $('pid').addEventListener('change', () => { try { localStorage.setItem('fovPid', $('pid').value); } catch (e) {} log('participant', true); });
 
 // ---------- camera ----------
-let stream = null;
+let streams = [];
+try { $('stereo').checked = localStorage.getItem('fovStereo') === '1'; } catch (e) {}
+function showStereoUi() { $('rowR').style.display = $('stereo').checked ? '' : 'none'; }
+showStereoUi();
+
 async function listCams() {
   try {
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
-    const sel = $('camSel'); const cur = sel.value;
-    sel.innerHTML = '<option value="">(ברירת מחדל)</option>' + devs.map((d, i) => `<option value="${d.deviceId}">${d.label || 'מצלמה ' + (i + 1)}</option>`).join('');
-    sel.value = cur;
-  } catch (e) {}
+    for (const id of ['camSel', 'camSelR']) {
+      const sel = $(id); const cur = sel.value;
+      sel.innerHTML = '<option value="">(אוטומטי)</option>' + devs.map((d, i) => `<option value="${d.deviceId}">${d.label || 'מצלמה ' + (i + 1)}</option>`).join('');
+      sel.value = cur;
+    }
+    return devs;
+  } catch (e) { return []; }
 }
+const constraints = id => ({ video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
+async function attach(v, st_) { v.srcObject = st_; await v.play(); }
+
 async function startCam() {
   try {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    const id = $('camSel').value;
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false
-    });
-    video.srcObject = stream;
-    await video.play();
-    const s = stream.getVideoTracks()[0].getSettings();
-    camAspect = (video.videoWidth || s.width || 4) / (video.videoHeight || s.height || 3);
-    $('status').textContent = `מצלמה פעילה: ${video.videoWidth}×${video.videoHeight} (${stream.getVideoTracks()[0].label})`;
-    await listCams();
-    layout(); log('camera_start', true);
+    streams.forEach(s_ => s_.getTracks().forEach(t => t.stop()));
+    streams = [];
+    stereoActive = false;
+    const wantStereo = $('stereo').checked;
+
+    const s1 = await navigator.mediaDevices.getUserMedia(constraints($('camSel').value));
+    streams.push(s1);
+    await attach(video, s1);
+    const devs = await listCams();
+    const idL = s1.getVideoTracks()[0].getSettings().deviceId || $('camSel').value;
+
+    let msg = '';
+    if (wantStereo) {
+      // pick the right-eye camera: the chosen one, else the first device that isn't the left one
+      const idR = $('camSelR').value || (devs.find(d => d.deviceId && d.deviceId !== idL) || {}).deviceId;
+      if (!idR) msg = ' · סטריאו לא זמין: נמצאה מצלמה אחת בלבד.';
+      else {
+        try {
+          const s2 = await navigator.mediaDevices.getUserMedia(constraints(idR));
+          streams.push(s2);
+          await attach(videoR, s2);
+          stereoActive = true;
+        } catch (e) { msg = ' · סטריאו לא זמין: המשקפיים לא נתנו לפתוח מצלמה שנייה (' + e.message + ').'; }
+      }
+    }
+    camAspect = (video.videoWidth || 4) / (video.videoHeight || 3);
+    const lab = streams.map(s_ => s_.getVideoTracks()[0].label).join(' | ');
+    $('status').textContent = `${stereoActive ? 'סטריאו פעיל' : 'מצלמה אחת לשתי העיניים'}: ${video.videoWidth}×${video.videoHeight} (${lab})${msg}`;
+    layout(); log(stereoActive ? 'camera_start_stereo' : 'camera_start_mono', true);
   } catch (e) {
     $('status').textContent = 'שגיאת מצלמה: ' + e.message + ' — בדוק הרשאת "headset cameras" (סמל המנעול ליד שורת הכתובת).';
   }
 }
 $('btnCam').onclick = startCam;
-$('camSel').onchange = () => { if (stream) startCam(); };
+$('camSel').onchange = $('camSelR').onchange = () => { if (streams.length) startCam(); };
+$('stereo').onchange = () => {
+  try { localStorage.setItem('fovStereo', $('stereo').checked ? '1' : '0'); } catch (e) {}
+  showStereoUi(); if (streams.length) startCam();
+};
+$('btnSwap').onclick = () => {
+  const L = streams[0]?.getVideoTracks()[0].getSettings().deviceId || $('camSel').value;
+  const R = streams[1]?.getVideoTracks()[0].getSettings().deviceId || $('camSelR').value;
+  $('camSel').value = R || ''; $('camSelR').value = L || '';
+  log('swap_cameras', true);
+  if (streams.length) startCam();
+};
 
 // ---------- XR ----------
 let xrMode = null;
@@ -312,7 +422,7 @@ let xrMode = null;
   $('btnXR').disabled = !xrMode;
 })();
 $('btnXR').onclick = async () => {
-  if (!stream) { $('status').textContent = 'קודם הפעל מצלמה.'; return; }
+  if (!streams.length) { $('status').textContent = 'קודם הפעל מצלמה.'; return; }
   try {
     const session = await navigator.xr.requestSession(xrMode, { optionalFeatures: ['local-floor'] });
     renderer.xr.setReferenceSpaceType('local');
@@ -343,6 +453,7 @@ function pollGamepads(t) {
       if (edge(0)) log('MARK_frame_disappeared', true);
       if (edge(4)) { const order = ['compress', 'crop', 'pass']; st.mode = order[(order.indexOf(st.mode) + 1) % 3]; layout(); log('mode', true); }
       if (edge(5)) { st.frameOn = !st.frameOn; layout(); log('frame_toggle', true); }
+      if (edge(3)) { st.surround = st.surround === 'black' ? 'blur' : 'black'; layout(); log('surround', true); }
       if (repeat && Math.abs(ax[1]) > 0.5) { st.W += -Math.sign(ax[1]) * step; layout(); log('set_W'); lastStep = t; }
       else if (repeat && Math.abs(ax[0]) > 0.5) { st.S += Math.sign(ax[0]) * step * 2; st.mode = 'custom'; layout(); log('set_S'); lastStep = t; }
     } else if (hand === 'left') {
