@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOV Compression – Quest 3</title>
+<style>
+  :root { --bg:#111; --fg:#eee; --mut:#999; --acc:#e33; --card:#1c1c1c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,"Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:880px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  .sub { color:var(--mut); margin:0 0 16px; font-size:.9rem; }
+  .card { background:var(--card); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .row { display:grid; grid-template-columns: 170px 1fr 70px; gap:10px; align-items:center; margin:8px 0; }
+  .row output { font-variant-numeric:tabular-nums; text-align:left; direction:ltr; }
+  input[type=range] { width:100%; direction:ltr; }
+  input[type=text], select { width:100%; padding:6px; background:#000; color:var(--fg); border:1px solid #444; border-radius:6px; }
+  button { font-size:1rem; padding:10px 16px; margin:4px; border:0; border-radius:8px; background:#333; color:#fff; cursor:pointer; }
+  button.primary { background:var(--acc); }
+  button:disabled { opacity:.4; cursor:default; }
+  #status { color:var(--mut); font-size:.9rem; min-height:1.2em; }
+  #preview { width:100%; aspect-ratio:4/3; background:#000; border-radius:8px; display:block; }
+  table { border-collapse:collapse; font-size:.85rem; width:100%; }
+  td { padding:3px 6px; border-bottom:1px solid #2a2a2a; }
+  kbd { background:#333; padding:1px 6px; border-radius:4px; font-family:inherit; direction:ltr; display:inline-block; }
+  .mut { color:var(--mut); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<main>
+  <h1>דחיסת שדה ראייה – Quest 3</h1>
+  <p class="sub">כל שדה הראייה של המצלמה נדחס לתוך חלון בזווית שבוחרים, עם מסגרת אדומה סביבו. כל השאר שחור.</p>
+
+  <div class="card">
+    <div class="row"><label for="pid">מזהה נבדק</label><input id="pid" type="text" placeholder="P01"><span></span></div>
+    <div class="row"><label for="camSel">מצלמה</label><select id="camSel"><option value="">(ברירת מחדל)</option></select><span></span></div>
+    <div>
+      <button id="btnCam" class="primary">1. הפעל מצלמה</button>
+      <button id="btnXR" disabled>2. כניסה למשקפיים</button>
+      <button id="btnCsv">הורד לוג CSV</button>
+      <button id="btnClear">נקה לוג</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><label for="sW">רוחב החלון (°)</label><input id="sW" type="range" min="3" max="80" step="0.5"><output id="oW"></output></div>
+    <div class="row"><label>גובה החלון (°, יחסי)</label><span class="mut">נגזר מיחס המצלמה</span><output id="oH"></output></div>
+    <div class="row"><label for="sS">זווית מקור שנדחסת (°)</label><input id="sS" type="range" min="3" max="120" step="0.5"><output id="oS"></output></div>
+    <div class="row"><label for="sMax">שדה ראייה של המצלמה (°)</label><input id="sMax" type="range" min="50" max="120" step="1"><output id="oMax"></output></div>
+    <div class="row"><label for="sYaw">הזזת חלון אופקית (°)</label><input id="sYaw" type="range" min="-30" max="30" step="0.5"><output id="oYaw"></output></div>
+    <div class="row"><label for="sPitch">הזזת חלון אנכית (°)</label><input id="sPitch" type="range" min="-30" max="30" step="0.5"><output id="oPitch"></output></div>
+    <div class="row"><label for="sFr">עובי מסגרת (°)</label><input id="sFr" type="range" min="0.2" max="3" step="0.1"><output id="oFr"></output></div>
+    <div class="row"><label>יחס דחיסה</label><span class="mut">זווית מקור ÷ רוחב חלון</span><output id="oRatio"></output></div>
+    <div>
+      <button data-mode="compress">דחיסה מלאה</button>
+      <button data-mode="crop">חיתוך (ראיית מנהרה)</button>
+      <button data-mode="pass">passthrough מלא</button>
+      <button id="btnFrame">מסגרת: פועלת</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <canvas id="preview"></canvas>
+    <p class="mut" style="font-size:.85rem">תצוגה מקדימה במחשב (מצלמת רשת). במחשב: חצים = רוחב / מקור, WASD = הזזה, רווח = סימון.</p>
+  </div>
+
+  <div class="card">
+    <b>שליטה בתוך המשקפיים (בקרים)</b>
+    <table>
+      <tr><td>סטיק ימני ↑↓</td><td>הגדלה / הקטנה של רוחב החלון</td></tr>
+      <tr><td>סטיק ימני ←→</td><td>זווית המקור (כמה מהעולם נדחס פנימה)</td></tr>
+      <tr><td>סטיק שמאלי</td><td>הזזת מרכז החלון (לשדה השיורי של הנבדק)</td></tr>
+      <tr><td>A</td><td>מעבר בין מצבים: דחיסה מלאה, חיתוך, passthrough</td></tr>
+      <tr><td>B</td><td>הדלקה / כיבוי של המסגרת האדומה</td></tr>
+      <tr><td>X</td><td>תצוגת נתונים (HUD) בתוך החלון</td></tr>
+      <tr><td>Y</td><td>איפוס לברירת מחדל</td></tr>
+      <tr><td>הדק ימני</td><td>סימון "המסגרת נעלמה" (נרשם בלוג)</td></tr>
+      <tr><td>הדק שמאלי</td><td>סימון "המסגרת חזרה" (נרשם בלוג)</td></tr>
+      <tr><td>Grip (לחיצה ארוכה) + סטיק</td><td>צעדים עדינים (0.1°)</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <b>לוג</b> <span id="logCount" class="mut"></span>
+    <table id="logTable"></table>
+  </div>
+</main>
+
+<video id="vid" playsinline muted style="display:none"></video>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- state ----------
+const DEFAULTS = { W: 20, S: 80, Smax: 80, yaw: 0, pitch: 0, frameDeg: 0.8, frameOn: true, mode: 'compress', hud: false };
+let st = { ...DEFAULTS };
+try { Object.assign(st, JSON.parse(localStorage.getItem('fovState') || '{}')); } catch (e) {}
+st.hud = false;
+let LOG = [];
+try { LOG = JSON.parse(localStorage.getItem('fovLog') || '[]'); } catch (e) {}
+const $ = id => document.getElementById(id);
+try { $('pid').value = localStorage.getItem('fovPid') || ''; } catch (e) {}
+
+const DIST = 2.0;           // metres from the eye to the virtual window
+const deg = d => d * Math.PI / 180;
+const rad2deg = r => r * 180 / Math.PI;
+let camAspect = 4 / 3;      // updated from the real video
+
+function clampState() {
+  st.Smax = Math.min(120, Math.max(50, st.Smax));
+  st.W = Math.min(80, Math.max(3, st.W));
+  st.S = Math.min(st.Smax, Math.max(3, st.S));
+  st.yaw = Math.min(30, Math.max(-30, st.yaw));
+  st.pitch = Math.min(30, Math.max(-30, st.pitch));
+  if (st.mode === 'compress') st.S = st.Smax;
+  if (st.mode === 'crop') st.S = Math.min(st.W, st.Smax);
+}
+const vAngle = hDeg => rad2deg(2 * Math.atan(Math.tan(deg(hDeg) / 2) / camAspect));
+
+// ---------- logging ----------
+// Each call snapshots the state now. Repeated parameter changes (a held stick) are coalesced:
+// only the settled value is written, 400 ms after the last change, or right before any other event.
+let pending = null, logTimer = null;
+function snapshot(event) {
+  return {
+    time: new Date().toISOString(), ms: Math.round(performance.now()),
+    participant: $('pid').value.trim(), event,
+    mode: st.mode, window_h_deg: +st.W.toFixed(2), window_v_deg: +vAngle(st.W).toFixed(2),
+    source_h_deg: +st.S.toFixed(2), ratio: +(st.S / st.W).toFixed(3),
+    yaw_deg: +st.yaw.toFixed(2), pitch_deg: +st.pitch.toFixed(2),
+    frame: st.frameOn ? 1 : 0, in_xr: renderer.xr.isPresenting ? 1 : 0
+  };
+}
+function push(row) {
+  LOG.push(row);
+  try { localStorage.setItem('fovLog', JSON.stringify(LOG)); } catch (e) {}
+  renderLog();
+}
+function flush() { clearTimeout(logTimer); if (pending) { push(pending); pending = null; } }
+function log(event, immediate = false) {
+  const row = snapshot(event);
+  if (pending && pending.event !== event) flush();
+  if (immediate) { flush(); push(row); return; }
+  pending = row; clearTimeout(logTimer); logTimer = setTimeout(flush, 400);
+}
+function renderLog() {
+  $('logCount').textContent = `(${LOG.length} שורות)`;
+  const rows = LOG.slice(-12).reverse().map(r =>
+    `<tr><td dir="ltr">${r.time.slice(11, 19)}</td><td>${r.event}</td><td dir="ltr">W ${r.window_h_deg}° · S ${r.source_h_deg}° · ${r.mode}</td></tr>`).join('');
+  $('logTable').innerHTML = rows;
+}
+function downloadCsv() {
+  if (!LOG.length) return;
+  const cols = Object.keys(LOG[0]);
+  const csv = [cols.join(',')].concat(LOG.map(r => cols.map(c => `"${String(r[c]).replace(/"/g, '""')}"`).join(','))).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
+  a.download = `fov_log_${($('pid').value.trim() || 'anon')}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+  a.click();
+}
+
+// ---------- three.js scene ----------
+const canvas = $('preview');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(90, 4 / 3, 0.05, 100);
+scene.add(camera);
+
+const video = $('vid');
+const tex = new THREE.VideoTexture(video);
+tex.colorSpace = THREE.SRGBColorSpace;
+tex.minFilter = THREE.LinearMipmapLinearFilter; // the image is minified several times: mipmaps prevent shimmering
+tex.generateMipmaps = true;
+
+const rig = new THREE.Group();        // head-locked: child of the camera
+camera.add(rig);
+const win = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+win.position.z = -DIST;
+rig.add(win);
+
+const frameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false });
+const bars = [0, 1, 2, 3].map(() => { const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), frameMat); m.position.z = -DIST; rig.add(m); return m; });
+
+// HUD (shown inside the window on demand so the participant/experimenter can read values)
+const hudCanvas = document.createElement('canvas'); hudCanvas.width = 512; hudCanvas.height = 128;
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+const hud = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.25), new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false, toneMapped: false }));
+hud.renderOrder = 10;
+rig.add(hud);
+
+function drawHud() {
+  const g = hudCanvas.getContext('2d');
+  g.clearRect(0, 0, 512, 128);
+  g.fillStyle = 'rgba(0,0,0,0.65)'; g.fillRect(0, 0, 512, 128);
+  g.fillStyle = '#fff'; g.font = 'bold 34px sans-serif'; g.textAlign = 'center';
+  g.fillText(`W ${st.W.toFixed(1)}°×${vAngle(st.W).toFixed(1)}°   S ${st.S.toFixed(1)}°`, 256, 50);
+  g.font = '28px sans-serif';
+  g.fillText(`${st.mode}  ×${(st.S / st.W).toFixed(2)}  (${st.yaw.toFixed(1)}°, ${st.pitch.toFixed(1)}°)`, 256, 100);
+  hudTex.needsUpdate = true;
+}
+
+function layout() {
+  clampState();
+  const w = 2 * DIST * Math.tan(deg(st.W) / 2);
+  const h = w / camAspect;
+  win.scale.set(w, h, 1);
+  rig.rotation.set(deg(st.pitch), -deg(st.yaw), 0, 'YXZ');
+
+  // centred crop of the rectilinear camera image: fraction of the image that spans S degrees
+  const f = Math.min(1, Math.tan(deg(st.S) / 2) / Math.tan(deg(st.Smax) / 2));
+  tex.repeat.set(f, f);
+  tex.offset.set((1 - f) / 2, (1 - f) / 2);
+
+  const t = DIST * Math.tan(deg(st.frameDeg));
+  const [top, bot, left, right] = bars;
+  top.scale.set(w + 2 * t, t, 1); top.position.set(0, h / 2 + t / 2, -DIST);
+  bot.scale.set(w + 2 * t, t, 1); bot.position.set(0, -h / 2 - t / 2, -DIST);
+  left.scale.set(t, h, 1); left.position.set(-w / 2 - t / 2, 0, -DIST);
+  right.scale.set(t, h, 1); right.position.set(w / 2 + t / 2, 0, -DIST);
+
+  const pass = st.mode === 'pass';
+  win.visible = !pass;
+  bars.forEach(b => b.visible = st.frameOn && !pass);
+  hud.visible = st.hud;
+  hud.scale.set(w * 0.9, w * 0.9, 1);
+  hud.position.set(0, -h / 2 + w * 0.9 * 0.125 + h * 0.03, -DIST + 0.01);
+  drawHud();
+
+  // passthrough mode: transparent background shows the headset's own passthrough (AR session only)
+  renderer.setClearColor(0x000000, pass && xrMode === 'immersive-ar' ? 0 : 1);
+  syncUi();
+  try { localStorage.setItem('fovState', JSON.stringify(st)); } catch (e) {}
+}
+
+// ---------- 2D UI ----------
+const sliders = { sW: 'W', sS: 'S', sMax: 'Smax', sYaw: 'yaw', sPitch: 'pitch', sFr: 'frameDeg' };
+function syncUi() {
+  for (const [id, k] of Object.entries(sliders)) $(id).value = st[k];
+  $('oW').textContent = st.W.toFixed(1) + '°';
+  $('oH').textContent = vAngle(st.W).toFixed(1) + '°';
+  $('oS').textContent = st.S.toFixed(1) + '°';
+  $('oMax').textContent = st.Smax.toFixed(0) + '°';
+  $('oYaw').textContent = st.yaw.toFixed(1) + '°';
+  $('oPitch').textContent = st.pitch.toFixed(1) + '°';
+  $('oFr').textContent = st.frameDeg.toFixed(1) + '°';
+  $('oRatio').textContent = '×' + (st.S / st.W).toFixed(2);
+  $('btnFrame').textContent = 'מסגרת: ' + (st.frameOn ? 'פועלת' : 'כבויה');
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('primary', b.dataset.mode === st.mode));
+}
+for (const [id, k] of Object.entries(sliders)) {
+  $(id).addEventListener('input', e => {
+    st[k] = parseFloat(e.target.value);
+    if (k === 'S') st.mode = 'custom';
+    layout(); log('set_' + k);
+  });
+}
+document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => { st.mode = b.dataset.mode; layout(); log('mode', true); }));
+$('btnFrame').onclick = () => { st.frameOn = !st.frameOn; layout(); log('frame_toggle', true); };
+$('btnCsv').onclick = () => { flush(); downloadCsv(); };
+$('btnClear').onclick = () => { if (confirmClear()) { LOG = []; try { localStorage.setItem('fovLog', '[]'); } catch (e) {} renderLog(); } };
+let clearArmed = 0;
+function confirmClear() { // two clicks within 3 s instead of a blocking dialog
+  if (Date.now() - clearArmed < 3000) return true;
+  clearArmed = Date.now(); $('status').textContent = 'לחץ שוב על "נקה לוג" לאישור.'; return false;
+}
+$('pid').addEventListener('change', () => { try { localStorage.setItem('fovPid', $('pid').value); } catch (e) {} log('participant', true); });
+
+// ---------- camera ----------
+let stream = null;
+async function listCams() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const sel = $('camSel'); const cur = sel.value;
+    sel.innerHTML = '<option value="">(ברירת מחדל)</option>' + devs.map((d, i) => `<option value="${d.deviceId}">${d.label || 'מצלמה ' + (i + 1)}</option>`).join('');
+    sel.value = cur;
+  } catch (e) {}
+}
+async function startCam() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const id = $('camSel').value;
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    const s = stream.getVideoTracks()[0].getSettings();
+    camAspect = (video.videoWidth || s.width || 4) / (video.videoHeight || s.height || 3);
+    $('status').textContent = `מצלמה פעילה: ${video.videoWidth}×${video.videoHeight} (${stream.getVideoTracks()[0].label})`;
+    await listCams();
+    layout(); log('camera_start', true);
+  } catch (e) {
+    $('status').textContent = 'שגיאת מצלמה: ' + e.message + ' — בדוק הרשאת "headset cameras" (סמל המנעול ליד שורת הכתובת).';
+  }
+}
+$('btnCam').onclick = startCam;
+$('camSel').onchange = () => { if (stream) startCam(); };
+
+// ---------- XR ----------
+let xrMode = null;
+(async () => {
+  if (!navigator.xr) { $('status').textContent = 'אין WebXR בדפדפן הזה — תצוגה מקדימה בלבד.'; return; }
+  if (await navigator.xr.isSessionSupported('immersive-ar').catch(() => false)) xrMode = 'immersive-ar';
+  else if (await navigator.xr.isSessionSupported('immersive-vr').catch(() => false)) xrMode = 'immersive-vr';
+  $('btnXR').disabled = !xrMode;
+})();
+$('btnXR').onclick = async () => {
+  if (!stream) { $('status').textContent = 'קודם הפעל מצלמה.'; return; }
+  try {
+    const session = await navigator.xr.requestSession(xrMode, { optionalFeatures: ['local-floor'] });
+    renderer.xr.setReferenceSpaceType('local');
+    await renderer.xr.setSession(session);
+    layout(); log('xr_enter', true);
+    session.addEventListener('end', () => { log('xr_exit', true); layout(); });
+  } catch (e) { $('status').textContent = 'שגיאה בכניסה למשקפיים: ' + e.message; }
+};
+
+// ---------- controller input ----------
+const prevBtn = {};
+let lastStep = 0;
+function pollGamepads(t) {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad; if (!gp) continue;
+    const hand = src.handedness; // 'left' | 'right'
+    const b = gp.buttons.map(x => x.pressed);
+    const was = prevBtn[hand] || [];
+    const edge = i => b[i] && !was[i];
+    const fine = b[1];                      // grip held → fine steps
+    const ax = gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
+    const step = fine ? 0.1 : 0.5;
+    const repeat = t - lastStep > (fine ? 120 : 70);
+
+    if (hand === 'right') {
+      if (edge(0)) log('MARK_frame_disappeared', true);
+      if (edge(4)) { const order = ['compress', 'crop', 'pass']; st.mode = order[(order.indexOf(st.mode) + 1) % 3]; layout(); log('mode', true); }
+      if (edge(5)) { st.frameOn = !st.frameOn; layout(); log('frame_toggle', true); }
+      if (repeat && Math.abs(ax[1]) > 0.5) { st.W += -Math.sign(ax[1]) * step; layout(); log('set_W'); lastStep = t; }
+      else if (repeat && Math.abs(ax[0]) > 0.5) { st.S += Math.sign(ax[0]) * step * 2; st.mode = 'custom'; layout(); log('set_S'); lastStep = t; }
+    } else if (hand === 'left') {
+      if (edge(0)) log('MARK_frame_visible', true);
+      if (edge(4)) { st.hud = !st.hud; layout(); }
+      if (edge(5)) { const keep = st.Smax; st = { ...DEFAULTS, Smax: keep, S: keep }; layout(); log('reset', true); }
+      if (repeat && (Math.abs(ax[0]) > 0.5 || Math.abs(ax[1]) > 0.5)) {
+        if (Math.abs(ax[0]) > 0.5) st.yaw += Math.sign(ax[0]) * step;
+        if (Math.abs(ax[1]) > 0.5) st.pitch += -Math.sign(ax[1]) * step;
+        layout(); log('set_offset'); lastStep = t;
+      }
+    }
+    prevBtn[hand] = b;
+  }
+}
+
+// ---------- desktop keyboard (preview testing) ----------
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  const k = e.key; let ev = null;
+  if (k === 'ArrowUp') { st.W += 0.5; ev = 'set_W'; }
+  else if (k === 'ArrowDown') { st.W -= 0.5; ev = 'set_W'; }
+  else if (k === 'ArrowRight') { st.S += 1; st.mode = 'custom'; ev = 'set_S'; }
+  else if (k === 'ArrowLeft') { st.S -= 1; st.mode = 'custom'; ev = 'set_S'; }
+  else if (k === 'a') { st.yaw -= 0.5; ev = 'set_offset'; }
+  else if (k === 'd') { st.yaw += 0.5; ev = 'set_offset'; }
+  else if (k === 'w') { st.pitch += 0.5; ev = 'set_offset'; }
+  else if (k === 's') { st.pitch -= 0.5; ev = 'set_offset'; }
+  else if (k === ' ') { log('MARK_frame_disappeared', true); e.preventDefault(); return; }
+  else return;
+  e.preventDefault(); layout(); log(ev);
+});
+
+// ---------- loop ----------
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!renderer.xr.isPresenting) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+}
+window.addEventListener('resize', resize);
+resize(); layout(); renderLog();
+renderer.setAnimationLoop(t => { pollGamepads(t); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
